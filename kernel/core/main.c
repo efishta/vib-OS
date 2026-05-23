@@ -15,6 +15,7 @@
 #include "mm/vmm.h"
 #include "printk.h"
 #include "sched/sched.h"
+#include "syscall/syscall.h"
 #include "types.h"
 
 /* Kernel version */
@@ -148,6 +149,11 @@ static void init_subsystems(void *dtb) {
   printk(KERN_INFO "  Initializing process subsystem...\n");
   extern void process_init(void);
   process_init();
+
+  /* Initialize system call table */
+  printk(KERN_INFO "  Initializing system calls...\n");
+  extern void syscall_init(void);
+  syscall_init();
 
   /* ================================================================= */
   /* Phase 4: Filesystems */

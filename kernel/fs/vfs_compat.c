@@ -167,30 +167,18 @@ int vfs_read_compat(vfs_node_t *node, char *buf, size_t size, size_t offset) {
     return (int)to_read;
   }
 
-  /* Check if this is a RAMFS node */
+  /* Check if this is a RAMFS node - node->internal is the raw data buffer */
   if (node->internal && node->size > 0) {
-    /* It's a RAMFS inode */
-    struct ramfs_inode {
-      unsigned long ino;
-      unsigned int mode;
-      unsigned int uid;
-      unsigned int gid;
-      size_t size;
-      unsigned char *data;
-      size_t data_capacity;
-      /* ... other fields we don't need */
-    };
-    struct ramfs_inode *rnode = (struct ramfs_inode *)node->internal;
+    size_t avail = node->size > offset ? node->size - offset : 0;
+    size_t to_read = size < avail ? size : avail;
 
-    if (rnode->data) {
-      size_t avail = rnode->size > offset ? rnode->size - offset : 0;
-      size_t to_read = size < avail ? size : avail;
-
+    if (to_read > 0) {
+      const unsigned char *src = (const unsigned char *)node->internal;
       for (size_t i = 0; i < to_read; i++) {
-        buf[i] = rnode->data[offset + i];
+        buf[i] = src[offset + i];
       }
-      return (int)to_read;
     }
+    return (int)to_read;
   }
 
   /* No data for other files */

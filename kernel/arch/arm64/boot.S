@@ -388,15 +388,15 @@ irq_handler:
     stp     x3, x4, [x1, #0xe0]
     ldr     x3, [x2, #240]
     str     x3, [x1, #0xf0]
-    ldp     x3, x4, [x2, #240]
-    ldr     x4, [x2, #256]
-    str     x3, [x1, #0x100]  /* pc from elr_el1 */
-    str     x4, [x1, #0x108]  /* pstate from spsr_el1 */
-    
+    ldr     x4, [x2, #248]       /* x4 = elr_el1 (exception PC) */
+    ldr     x3, [x2, #256]       /* x3 = spsr_el1 (exception PSTATE) */
+    str     x4, [x1, #0x100]     /* PC = elr_el1 */
+    str     x3, [x1, #0x108]     /* PSTATE = spsr_el1 */
+
     /* Save sp */
     add     x3, sp, #272
     str     x3, [x1, #0xf8]
-    
+
     /* Switch to process: get context pointer */
     add     x0, x0, #CONTEXT_OFFSET
     add     sp, sp, #272

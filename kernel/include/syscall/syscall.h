@@ -295,10 +295,9 @@
 /* ===================================================================== */
 
 struct pt_regs {
-    uint64_t regs[31];
-    uint64_t sp;
-    uint64_t pc;
-    uint64_t pstate;
+    uint64_t regs[31];   /* x0-x30 */
+    uint64_t elr;         /* ELR_EL1 (exception PC, saved at offset 248 by boot.S) */
+    uint64_t spsr;        /* SPSR_EL1 (saved PSTATE, saved at offset 256 by boot.S) */
 };
 
 /* ===================================================================== */

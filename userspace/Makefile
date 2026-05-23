@@ -4,12 +4,13 @@ CC = clang
 CFLAGS = -target aarch64-unknown-none-elf \
          -ffreestanding -fno-builtin \
          -nostdlib -nostdinc \
+         -fPIE \
          -I../build/sysroot/usr/include \
          -I../libc/include \
          -O2 -Wall -Wextra
 
 LD = ld.lld
-LDFLAGS = -nostdlib -static
+LDFLAGS = -nostdlib -static -pie
 
 BUILD_DIR = ../build/userspace
 SYSROOT = ../build/sysroot

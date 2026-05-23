@@ -14,6 +14,7 @@
 #include "../include/mm/kmalloc.h"
 #include "../include/printk.h"
 #include "../include/sync/spinlock.h"
+#include "../include/syscall/syscall.h"
 
 /* Forward declare strncpy and strlen from our kernel */
 extern char *strncpy(char *dst, const char *src, size_t n);
@@ -223,8 +224,13 @@ int process_create(const char *path, int argc, char **argv) {
   }
 
   // Align load address with ASLR randomization
+  // Must stay within identity-mapped RAM (0 - 0x80000000) but above heap (0x4a000000)
+  #define LOAD_ADDR_MIN 0x50000000ULL
+  #define LOAD_ADDR_MAX 0x7FFF0000ULL
+  uint64_t addr_range = LOAD_ADDR_MAX - LOAD_ADDR_MIN;
   uint64_t aslr_offset = aslr_exec_offset();
-  uint64_t load_addr = ALIGN_64K(next_load_addr + aslr_offset);
+  uint64_t load_addr = LOAD_ADDR_MIN + (aslr_offset % addr_range);
+  load_addr = ALIGN_64K(load_addr);
 
   // Load the ELF at this address
   elf_load_info_t info;
@@ -241,7 +247,7 @@ int process_create(const char *path, int argc, char **argv) {
 
   // Set up process structure
   process_t *proc = &proc_table[slot];
-  proc->pid = next_pid++;
+  // pid was already set above (inside the locked section)
   strncpy(proc->name, path, PROCESS_NAME_MAX - 1);
   proc->name[PROCESS_NAME_MAX - 1] = '\0';
   proc->state = PROC_STATE_READY;
@@ -274,10 +280,10 @@ int process_create(const char *path, int argc, char **argv) {
 
 #ifdef ARCH_ARM64
   arch_context_set_flags(&proc->context,
-                         0x3c5); // EL1h, DAIF masked (IRQs disabled initially)
-  // Pass arguments via callee-saved registers
+                         0x305); // EL1h, DAIF UNMASKED (IRQs enabled for preemption)
+  // Pass arguments via callee-saved registers: x19=entry, x21=argc, x22=argv
   proc->context.x[19] = proc->entry;          // x19 = entry point
-  proc->context.x[20] = (uint64_t)kapi_get(); // x20 = kapi pointer
+  proc->context.x[20] = 0;                    // unused
   proc->context.x[21] = (uint64_t)argc;       // x21 = argc
   proc->context.x[22] = (uint64_t)argv;       // x22 = argv
 #elif defined(ARCH_X86_64)
@@ -325,20 +331,43 @@ uint32_t get_current_stack_top(void) {
 }
 
 // Entry wrapper - called when a new process is switched to for the first time
+// Also used by sys_execve to transition to a new binary
 // Architecture-specific implementation
 #ifdef ARCH_ARM64
 // Parameters passed in callee-saved registers x19-x22 (preserved across context
 // switch) x19 = entry, x20 = kapi, x21 = argc, x22 = argv
 static void __attribute__((naked)) process_entry_wrapper(void) {
-  asm volatile("mov x0, x20\n"     // x0 = kapi
-               "mov x1, x21\n"     // x1 = argc
-               "mov x2, x22\n"     // x2 = argv
-               "blr x19\n"         // Call entry(kapi, argc, argv)
+  asm volatile("mov x0, x21\n"     // x0 = argc
+               "mov x1, x22\n"     // x1 = argv
+               "mov x2, xzr\n"     // x2 = envp (NULL for now)
+               "blr x19\n"         // Call _start(argc, argv, envp)
                "bl process_exit\n" // Exit with return value
                "1: b 1b\n"         // Should never reach here
                ::
                    : "memory");
 }
+
+/*
+ * process_execve_setup - Redirect current process to a new binary's entry point
+ * Called from sys_execve to transition eret to process_entry_wrapper which
+ * invokes the new binary's _start(argc, argv, NULL).
+ */
+void process_execve_setup(struct pt_regs *regs, uint64_t entry, int argc, char **argv) {
+  /* Redirect SVC return to process_entry_wrapper */
+  regs->elr = (uint64_t)process_entry_wrapper;
+  regs->spsr = 0x305;  /* EL1h, IRQs enabled */
+  regs->regs[19] = entry;
+  regs->regs[20] = 0;
+  regs->regs[21] = (uint64_t)(uintptr_t)argc;
+  regs->regs[22] = (uint64_t)argv;
+  regs->regs[29] = 0;
+  regs->regs[30] = 0;
+
+  /* Note: SP is NOT reset here because we're still in C call chain.
+   * The existing process stack (1MB) is reused. The entry wrapper will
+   * set up its own stack frame below the current SP. */
+}
+
 #elif defined(ARCH_X86_64)
 // Parameters passed in callee-saved registers r12-r15
 // r12 = entry, r13 = kapi, r14 = argc, r15 = argv
@@ -634,6 +663,75 @@ void process_schedule_from_irq(void) {
       return;
     }
   }
+}
+
+// Simple fork - create child as copy of current process
+int process_fork(void) {
+  process_t *parent = current_process;
+  if (!parent) return -1;
+
+  uint64_t flags = spin_lock_irqsave(&proc_table_lock);
+  int slot = find_free_slot_unlocked();
+  if (slot < 0) {
+    spin_unlock_irqrestore(&proc_table_lock, flags);
+    return -1;
+  }
+  // Reserve slot
+  proc_table[slot].state = PROC_STATE_READY;
+  proc_table[slot].pid = next_pid++;
+  spin_unlock_irqrestore(&proc_table_lock, flags);
+
+  process_t *child = &proc_table[slot];
+  strncpy(child->name, parent->name, PROCESS_NAME_MAX - 1);
+  child->name[PROCESS_NAME_MAX - 1] = '\0';
+  child->load_base = parent->load_base;
+  child->load_size = parent->load_size;
+  child->entry = parent->entry;
+  child->parent_pid = parent->pid;
+  child->exit_status = 0;
+
+  // Allocate child stack (fresh copy not needed since we eret directly)
+  child->stack_size = parent->stack_size;
+  child->stack_base = malloc(child->stack_size);
+  if (!child->stack_base) {
+    proc_table[slot].state = PROC_STATE_FREE;
+    return -1;
+  }
+
+  // Copy parent's entire stack contents to child so any saved frames
+  // (including the pt_regs from the SVC) are preserved on the child's stack
+  uint8_t *src = (uint8_t *)parent->stack_base;
+  uint8_t *dst = (uint8_t *)child->stack_base;
+  for (size_t i = 0; i < child->stack_size; i++) {
+    dst[i] = src[i];
+  }
+
+  // Set up child's cpu_context to ERET directly to userspace at the
+  // instruction after SVC (elr_el1) with return value 0 in x0.
+  //
+  // The parent's cpu_context contains stale initial values (set at process
+  // creation), so we must read the actual exception state from elr_el1/spsr_el1
+  // which were set when SVC was taken and are still valid inside this handler.
+  uint64_t svc_elr, svc_spsr;
+  asm volatile("mrs %0, elr_el1" : "=r"(svc_elr));
+  asm volatile("mrs %0, spsr_el1" : "=r"(svc_spsr));
+
+  // Calculate child's stack pointer: use same offset from stack base as parent
+  uint64_t parent_sp;
+  asm volatile("mov %0, sp" : "=r"(parent_sp));
+  uint64_t sp_offset = (uint64_t)parent->stack_base + parent->stack_size - parent_sp;
+  uint64_t child_sp = (uint64_t)child->stack_base + child->stack_size - sp_offset;
+
+  // Build child context
+  memset(&child->context, 0, sizeof(cpu_context_t));
+  arch_context_set_pc(&child->context, svc_elr);
+  arch_context_set_flags(&child->context, svc_spsr);
+  arch_context_set_sp(&child->context, child_sp & ~0xFULL);
+  child->context.x[0] = 0; // fork returns 0 in child
+
+  printf("[PROC] Forked child pid=%d from pid=%d (pc=0x%llx)\n",
+         child->pid, parent->pid, (unsigned long long)svc_elr);
+  return child->pid;
 }
 
 // Kill all children of a process (iterative to prevent stack overflow)

@@ -85,9 +85,9 @@ QEMU_FLAGS := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) \
 # Main Targets
 # ============================================================================
 
-.PHONY: all clean kernel drivers libc userspace runtimes image qemu qemu-debug test help
+.PHONY: all clean kernel drivers libc userspace embed runtimes image qemu qemu-debug test help
 
-all: kernel drivers libc userspace runtimes image
+all: libc userspace embed kernel drivers runtimes image
 	@echo "=========================================="
 	@echo "UnixOS build complete!"
 	@echo "=========================================="
@@ -217,6 +217,15 @@ userspace: $(BUILD_DIR) libc
 	else \
 		echo "[USERSPACE] Source not yet configured"; \
 	fi
+
+# ============================================================================
+# Embed Userspace Binaries into Kernel
+# ============================================================================
+
+embed: $(BUILD_DIR) userspace
+	@echo "[EMBED] Embedding userspace binaries into kernel..."
+	@python3 scripts/embed_apps.py $(BUILD_DIR) $(KERNEL_DIR)
+	@echo "[EMBED] Regenerated kernel/apps/embedded_apps.c"
 
 # ============================================================================
 # Runtimes Build (Python, Node.js)
